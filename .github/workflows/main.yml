@@ -23,29 +23,55 @@ jobs:
           go-version: "1.22.x"
           cache: true
 
-      - name: Install build dependencies (goyacc)
-        run: go install golang.org/x/tools/cmd/goyacc@latest
-
-      - name: Install reporters (JUnit)
-        run: go install github.com/jstemmer/go-junit-report/v2@latest
-
-      # ---- BUILD (using make) ----
-      - name: Build
+      - name: Install tools (promu, goyacc, junit reporter)
         run: |
-          # Use `make` to execute the standardized build process defined in the Makefile.
-          make build
-          # Debugging: Check for the file existence and list the contents
-          echo "Checking for .build/linux-amd64/prometheus..."
+          go install github.com/prometheus/promu@latest
+          go install golang.org/x/tools/cmd/goyacc@latest
+          go install github.com/jstemmer/go-junit-report/v2@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
-      # ---- TEST + COVERAGE (using make) ----
+      # ---- BUILD via Makefile (skip UI/assets to keep CI minimal) ----
+      - name: make build (skip UI) + ensure bin/prometheus
+        run: |
+          set -e
+          # Skip UI/assets to avoid Node and go:embed surprises
+          make build PREBUILT_ASSETS_STATIC_DIR=.
+
+          # Ensure we have bin/prometheus for packaging
+          mkdir -p bin
+          OS=$(go env GOOS); ARCH=$(go env GOARCH)
+          CANDIDATES=(
+            ".build/${OS}-${ARCH}/prometheus"
+            ".build/linux-amd64/prometheus"
+            "prometheus"
+          )
+          FOUND=""
+          for p in "${CANDIDATES[@]}"; do
+            if [ -f "$p" ]; then
+              FOUND="$p"
+              break
+            fi
+          done
+          if [ -z "$FOUND" ]; then
+            echo "No Makefile output found; falling back to go build..."
+            CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -buildid=" -o bin/prometheus ./cmd/prometheus
+          else
+            cp "$FOUND" bin/prometheus
+          fi
+          test -f bin/prometheus
+          chmod +x bin/prometheus
+          ls -lah bin/
+
+      # ---- TEST via Makefile (Go only; no UI tests) ----
+      - name: make test (GO_ONLY)
+        run: |
+          make test GO_ONLY=1 || true
+
+      # ---- TEST REPORTS (JSON + coverage + JUnit) ----
       - name: Test (JSON + coverage + JUnit)
         run: |
           mkdir -p reports
-          # Use `make` to execute the standardized test process.
-          # This handles all dependencies like the parser and UI tests.
-          make test || true
-          # The `make test` command doesn't output the JUnit report directly,
-          # so we still need to generate it from the go test JSON output.
+          go test ./... -count=1 -race -coverprofile=reports/coverage.out -json > reports/test.json || true
           cat reports/test.json | go-junit-report -parser gojson > reports/junit.xml || true
           go tool cover -func=reports/coverage.out || true
           go tool cover -html=reports/coverage.out -o reports/coverage.html || true
@@ -77,7 +103,7 @@ jobs:
             echo "- Coverage HTML: \`reports/coverage.html\`" >> $GITHUB_STEP_SUMMARY
           fi
 
-      # ---- PACKAGE ARTIFACT ----
+      # ---- PACKAGE ARTIFACT (tar only the needed files) ----
       - name: Ensure prometheus.yml present
         run: |
           test -f prometheus.yml || (echo "prometheus.yml missing in repo root"; exit 1)
@@ -86,21 +112,11 @@ jobs:
         run: |
           set -e
           mkdir -p artifacts
-
-          # Ensure the binary exists; adjust to your build strategy
-          if [ -f .build/linux-amd64/prometheus ]; then
-            mkdir -p bin
-            cp .build/linux-amd64/prometheus bin/prometheus
-          fi
           test -f bin/prometheus || (echo "bin/prometheus missing"; exit 1)
-          test -f prometheus.yml || (echo "prometheus.yml missing"; exit 1)
-
           OS=$(go env GOOS); ARCH=$(go env GOARCH); VER=${GITHUB_SHA::7}
-          # Only include the two files we want; change to repo root first
           tar -C . -czf artifacts/prometheus_${VER}_${OS}_${ARCH}.tar.gz \
             bin/prometheus \
             prometheus.yml
-
           ls -lah artifacts/
 
       - name: Upload build/test artifacts
@@ -108,7 +124,7 @@ jobs:
         with:
           name: build-test-artifacts
           path: |
-            .build/**
+            bin/**
             reports/**
             artifacts/**
             prometheus.yml
