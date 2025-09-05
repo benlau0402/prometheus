@@ -421,7 +421,7 @@ export default function AlertsPage() {
         <TextInput
           flex={1}
           leftSection={<IconSearch style={inputIconStyle} />}
-          placeholder="Filter by rule name or labels"
+          placeholder="Filter name or labels by rule's"
           value={searchFilter || ""}
           onChange={(event) =>
             setSearchFilter(event.currentTarget.value || null)
