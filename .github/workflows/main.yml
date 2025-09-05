@@ -43,19 +43,14 @@ jobs:
           DATE_UTC="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           GOVERS="$(go version)"
           MOD_ROOT="$(go list -m)"
-          # Verify modules and capture output (non-fatal if it prints warnings)
           MOD_VERIFY="$(go mod verify 2>&1 || true)"
-          # Binary info
           BIN_PATH="bin/prometheus"
           if [ ! -f "$BIN_PATH" ]; then
             echo "ERROR: $BIN_PATH missing. Build step must succeed before report."; exit 1
           fi
           BIN_SIZE_BYTES="$(wc -c < "$BIN_PATH" | xargs)"
           BIN_SHA256="$(sha256sum "$BIN_PATH" | awk '{print $1}')"
-          # Write dependency list
           go list -m all > reports/dependencies.txt
-
-          # Markdown report
           {
             echo "# Build Report"
             echo ""
@@ -94,8 +89,6 @@ jobs:
             echo "- Size (bytes): \`$BIN_SIZE_BYTES\`"
             echo "- SHA256: \`$BIN_SHA256\`"
           } > reports/BUILD_REPORT.md
-
-          # Minimal JSON summary (no jq dependency)
           cat > reports/build.json <<EOF
           {
             "date_utc": "$DATE_UTC",
@@ -121,6 +114,33 @@ jobs:
           go tool cover -func=reports/coverage.out || true
           go tool cover -html=reports/coverage.out -o reports/coverage.html || true
 
+      # ---- NEW: Convert JUnit XML -> HTML (Option A: junit-viewer) ----
+      - name: Set up Node (for junit-viewer)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Generate HTML test report
+        if: always()
+        run: |
+          npm i -g junit-viewer
+          # Don't fail the job if junit.xml is empty/missing
+          if [ -s reports/junit.xml ]; then
+            junit-viewer --results=reports/junit.xml --save=reports/test-report.html
+          else
+            echo "No junit.xml found or file is empty; skipping HTML generation."
+          fi
+
+      - name: Add report link to job summary
+        if: always()
+        run: |
+          echo "### Test Reports" >> $GITHUB_STEP_SUMMARY
+          echo "- JUnit XML: \`reports/junit.xml\`" >> $GITHUB_STEP_SUMMARY
+          echo "- HTML: \`reports/test-report.html\` (download from the 'build-test-artifacts' artifact)" >> $GITHUB_STEP_SUMMARY
+          if [ -f reports/coverage.html ]; then
+            echo "- Coverage HTML: \`reports/coverage.html\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
       # ---- PACKAGE ARTIFACT ----
       - name: Ensure prometheus.yml present
         run: |
@@ -141,93 +161,3 @@ jobs:
             reports/**
             dist/**
             prometheus.yml
-
-  docker_staging:
-    name: Docker (upstream Dockerfile)
-    runs-on: ubuntu-latest
-    needs: build_test_package
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        persist-credentials: false
-
-    - name: Set up Go (for promu)
-      uses: actions/setup-go@v5
-      with:
-        go-version: "1.22.x"
-        cache: true
-
-    - name: Ensure GOPATH/bin on PATH (defensive)
-      run: echo "$HOME/go/bin" >> "$GITHUB_PATH"
-
-    - name: Set up Node (for npm_licenses)
-      uses: actions/setup-node@v4
-      with:
-        node-version: "18"
-
-    # Keep linux-amd64 artifacts in Docker context
-    - name: Patch .dockerignore for linux-amd64 artifacts
-      run: |
-        if [ -f .dockerignore ]; then
-          sed -i '/^\.build\/$/d' .dockerignore || true
-          sed -i '/^\.build\/\*$/d' .dockerignore || true
-        fi
-        {
-          echo ".build/*"
-          echo "!.build/linux-amd64/**"
-          echo "/.tarballs/"
-          echo "/data/"
-        } > .dockerignore.tmp
-        (grep -vE '^\.(build|tarballs)/|^/data/|^\s*$' .dockerignore || true) >> .dockerignore.tmp
-        mv .dockerignore.tmp .dockerignore
-        echo "Final .dockerignore:"; cat .dockerignore
-
-    # 1) make promu
-    - name: Install promu & run make promu
-      run: |
-        go install github.com/prometheus/promu@latest
-        promu version || promu help | head -n1
-        make promu
-
-    # 2) promu crossbuild -p linux/amd64
-    - name: Cross build artifacts (linux/amd64)
-      env:
-        GOOS: linux
-        GOARCH: amd64
-      run: |
-        promu version || true
-        promu crossbuild -p linux/amd64
-        ls -lah .build/linux-amd64 || true
-
-    # 3) make npm_licenses
-    - name: Generate npm licenses tarball
-      run: |
-        make npm_licenses
-        test -f npm_licenses.tar.bz2 || (echo "npm_licenses.tar.bz2 missing" && exit 1)
-
-    # Sanity check the inputs the Dockerfile will COPY
-    - name: Sanity check Dockerfile inputs
-      run: |
-        test -f .build/linux-amd64/prometheus || (echo "prometheus binary missing" && exit 1)
-        test -f .build/linux-amd64/promtool   || (echo "promtool binary missing" && exit 1)
-        test -f documentation/examples/prometheus.yml || (echo "example prometheus.yml missing" && exit 1)
-        test -f npm_licenses.tar.bz2 || (echo "npm_licenses.tar.bz2 missing" && exit 1)
-
-    # 4) Build image using the existing Dockerfile
-    - name: Build Docker image (upstream Dockerfile)
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: Dockerfile
-        push: false
-        tags: local/prometheus:amd64
-
-    - name: Save image as artifact
-      run: docker save local/prometheus:amd64 -o prometheus_ci_image.tar
-
-    - name: Upload Docker artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: docker-image-tar
-        path: prometheus_ci_image.tar
