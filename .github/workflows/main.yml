@@ -33,8 +33,11 @@ jobs:
       - name: Build
         run: |
           # Use `make` to execute the standardized build process defined in the Makefile.
-          # This ensures consistency with local development and handles dependencies.
           make build
+          # Debugging: Check for the file existence and list the contents
+          echo "Checking for .build/linux-amd64/prometheus..."
+          ls -lah .build/linux-amd64/
+          test -f .build/linux-amd64/prometheus || { echo "ERROR: .build/linux-amd64/prometheus not found!"; exit 1; }
 
       # ---- TEST + COVERAGE (using make) ----
       - name: Test (JSON + coverage + JUnit)
@@ -87,7 +90,7 @@ jobs:
           OS=$(go env GOOS); ARCH=$(go env GOARCH); VER=${GITHUB_SHA::7}
           # The 'promu' tool puts the binary in .build/linux-amd64/prometheus.
           # We must use that path here.
-          tar -czf dist/prometheus_${VER}_${OS}_${ARCH}.tar.gz .build/linux-amd64/prometheus prometheus.yml
+          tar -czf dist/prometheus_${VER}_${OS}_${ARCH}.tar.gz /home/runner/work/prometheus/prometheus  prometheus.yml
 
       - name: Upload build/test artifacts
         uses: actions/upload-artifact@v4
@@ -184,7 +187,7 @@ jobs:
         run: docker save local/prometheus:amd64 -o prometheus_ci_image.tar
 
       - name: Upload Docker artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4@
         with:
           name: docker-image-tar
           path: prometheus_ci_image.tar
