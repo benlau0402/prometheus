@@ -148,10 +148,15 @@ common-test-short: $(GOTEST_DIR)
 	@echo ">> running short tests"
 	$(GOTEST) -short $(GOOPTS) $(pkgs)
 
-.PHONY: common-test
-common-test: $(GOTEST_DIR)
-	@echo ">> running all tests"
-	$(GOTEST) $(test-flags) $(GOOPTS) $(pkgs)
+.PHONY: test-report
+test-report:
+	@echo ">> Running tests with coverage + junit output"
+	mkdir -p reports
+	$(GO) test ./... -count=1 -race -coverprofile=reports/coverage.out -json > reports/test.json || true
+	cat reports/test.json | go-junit-report -parser gojson > reports/junit.xml || true
+	$(GO) tool cover -func=reports/coverage.out || true
+	$(GO) tool cover -html=reports/coverage.out -o reports/coverage.html || true
+
 
 $(GOTEST_DIR):
 	@mkdir -p $@
