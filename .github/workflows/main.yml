@@ -74,14 +74,6 @@ jobs:
           set -e
           exit $STATUS || true
 
-      - name: Test (JSON + coverage + JUnit)
-        run: |
-          mkdir -p reports
-          go test ./... -count=1 -race -coverprofile=reports/coverage.out -json > reports/test.json || true
-          cat reports/test.json | go-junit-report -parser gojson > reports/junit.xml || true
-          go tool cover -func=reports/coverage.out || true
-          go tool cover -html=reports/coverage.out -o reports/coverage.html || true
-
       # ---- Convert JUnit XML -> HTML (junit2html) ----
       - name: Set up Python
         uses: actions/setup-python@v5
