@@ -20,30 +20,29 @@ jobs:
       - name: Set up Go (built-in cache)
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          go-version: "1.24.x"
           cache: true
 
-      - name: Install tools (promu, goyacc, junit reporter)
+      - name: Install build deps (goyacc, junit reporter)
         run: |
-          go install github.com/prometheus/promu@latest
           go install golang.org/x/tools/cmd/goyacc@latest
           go install github.com/jstemmer/go-junit-report/v2@latest
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
-      # ---- BUILD via Makefile (skip UI/assets to keep CI minimal) ----
-      - name: make build (skip UI) + ensure bin/prometheus
+      # ---- BUILD (try Makefile; ensure bin/prometheus via fallback) ----
+      - name: Build (make) and ensure binary
         run: |
           set -e
-          # Skip UI/assets to avoid Node and go:embed surprises
-          make build PREBUILT_ASSETS_STATIC_DIR=.
+          # Try a full Makefile build. If it fails (e.g., UI/embed issues), continue and fallback.
+          if ! make build; then
+            echo "make build failed or incomplete; will try to locate output or fallback to 'go build'."
+          fi
 
-          # Ensure we have bin/prometheus for packaging
           mkdir -p bin
           OS=$(go env GOOS); ARCH=$(go env GOARCH)
           CANDIDATES=(
             ".build/${OS}-${ARCH}/prometheus"
             ".build/linux-amd64/prometheus"
-            "prometheus"
           )
           FOUND=""
           for p in "${CANDIDATES[@]}"; do
@@ -52,22 +51,100 @@ jobs:
               break
             fi
           done
+
           if [ -z "$FOUND" ]; then
-            echo "No Makefile output found; falling back to go build..."
+            echo "Makefile output not found, falling back to 'go build'..."
             CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -buildid=" -o bin/prometheus ./cmd/prometheus
           else
             cp "$FOUND" bin/prometheus
           fi
-          test -f bin/prometheus
+
+          test -f bin/prometheus || (echo "bin/prometheus still missing"; exit 1)
           chmod +x bin/prometheus
+          file bin/prometheus || true
           ls -lah bin/
 
-      # ---- TEST via Makefile (Go only; no UI tests) ----
-      - name: make test (GO_ONLY)
         run: |
-          make test GO_ONLY=1 || true
+          set -e
+          mkdir -p reports
+          COMMIT="${GITHUB_SHA}"
+          REF="${GITHUB_REF}"
+          RUN_ID="${GITHUB_RUN_ID}"
+          DATE_UTC="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          GOVERS="$(go version)"
+          MOD_ROOT="$(go list -m)"
+          MOD_VERIFY="$(go mod verify 2>&1 || true)"
+          BIN_PATH="bin/prometheus"
+          [ -f "$BIN_PATH" ] || (echo "ERROR: $BIN_PATH missing"; exit 1)
+          BIN_SIZE_BYTES="$(wc -c < "$BIN_PATH" | xargs)"
+          BIN_SHA256="$(sha256sum "$BIN_PATH" | awk '{print $1}')"
+          go list -m all > reports/dependencies.txt
 
-      # ---- TEST REPORTS (JSON + coverage + JUnit) ----
+          {
+            echo "# Build Report"
+            echo ""
+            echo "- **Date (UTC):** $DATE_UTC"
+            echo "- **Commit:** $COMMIT"
+            echo "- **Ref:** $REF"
+            echo "- **Run ID:** $RUN_ID"
+            echo ""
+            echo "## Environment"
+            echo ""
+            echo "\`\`\`"
+            echo "$GOVERS"
+            go env
+            echo "\`\`\`"
+            echo ""
+            echo "## Module"
+            echo ""
+            echo "- Root module: \`$MOD_ROOT\`"
+            echo "- Full dependency list: see \`reports/dependencies.txt\`"
+            echo ""
+            echo "## Build Command"
+            echo ""
+            echo "\`\`\`bash"
+            echo "make build  # with fallback to 'go build' if needed"
+            echo "\`\`\`"
+            echo ""
+            echo "## Module Verification"
+            echo ""
+            echo "\`\`\`"
+            echo "$MOD_VERIFY"
+            echo "\`\`\`"
+            echo ""
+            echo "## Binary"
+            echo ""
+            echo "- Path: \`$BIN_PATH\`"
+            echo "- Size (bytes): \`$BIN_SIZE_BYTES\`"
+            echo "- SHA256: \`$BIN_SHA256\`"
+          } > reports/BUILD_REPORT.md
+
+          cat > reports/build.json <<EOF
+          {
+            "date_utc": "$DATE_UTC",
+            "commit": "$COMMIT",
+            "ref": "$REF",
+            "run_id": "$RUN_ID",
+            "go_version": "$GOVERS",
+            "module_root": "$MOD_ROOT",
+            "binary": {
+              "path": "$BIN_PATH",
+              "size_bytes": $BIN_SIZE_BYTES,
+              "sha256": "$BIN_SHA256"
+            }
+          }
+          EOF
+
+      # ---- TEST via Makefile (Go-only is acceptable) + extra reports ----
+      - name: make test (allow non-zero to keep pipeline reporting)
+        run: |
+          set +e
+          # Prefer Go-only to keep CI lightweight; change to plain 'make test' if you want UI tests
+          make test GO_ONLY=1
+          STATUS=$?
+          set -e
+          exit $STATUS || true
+
       - name: Test (JSON + coverage + JUnit)
         run: |
           mkdir -p reports
@@ -103,7 +180,7 @@ jobs:
             echo "- Coverage HTML: \`reports/coverage.html\`" >> $GITHUB_STEP_SUMMARY
           fi
 
-      # ---- PACKAGE ARTIFACT (tar only the needed files) ----
+      # ---- PACKAGE ARTIFACT (use bin/prometheus) ----
       - name: Ensure prometheus.yml present
         run: |
           test -f prometheus.yml || (echo "prometheus.yml missing in repo root"; exit 1)
@@ -111,8 +188,8 @@ jobs:
       - name: Package tarball
         run: |
           set -e
-          mkdir -p artifacts
           test -f bin/prometheus || (echo "bin/prometheus missing"; exit 1)
+          mkdir -p artifacts
           OS=$(go env GOOS); ARCH=$(go env GOARCH); VER=${GITHUB_SHA::7}
           tar -C . -czf artifacts/prometheus_${VER}_${OS}_${ARCH}.tar.gz \
             bin/prometheus \
@@ -142,7 +219,7 @@ jobs:
       - name: Set up Go (for promu)
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          go-version: "1.24.x"
           cache: true
 
       - name: Ensure GOPATH/bin on PATH (defensive)
@@ -174,7 +251,7 @@ jobs:
       - name: Install promu & run make promu
         run: |
           go install github.com/prometheus/promu@latest
-          promu version || promu help | head -n1
+          promu help | head -n1 || true
           make promu
 
       # 2) promu crossbuild -p linux/amd64
@@ -183,7 +260,7 @@ jobs:
           GOOS: linux
           GOARCH: amd64
         run: |
-          promu version || true
+          promu --help | head -n1 || true
           promu crossbuild -p linux/amd64
           ls -lah .build/linux-amd64 || true
 
