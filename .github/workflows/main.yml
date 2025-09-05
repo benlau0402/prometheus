@@ -123,9 +123,12 @@ jobs:
       - name: Generate HTML test report
         if: always()
         run: |
-          npm i -g xunit-viewer || echo "xunit-viewer install warned"
+          npm i -g xunit-viewer || echo "install warning"
           if [ -s reports/junit.xml ]; then
-            xunit-viewer -r reports/junit.xml -o reports/test-report.html -t "Go Tests" || true
+            xunit-viewer --results=reports/junit.xml \
+                        --output=reports/test-report.html \
+                        --title="Go Tests" || echo "xunit-viewer failed"
+            ls -lh reports/
           else
             echo "No junit.xml found or file is empty; skipping HTML generation."
           fi
