@@ -85,14 +85,16 @@ jobs:
         run: |
           mkdir -p dist
           OS=$(go env GOOS); ARCH=$(go env GOARCH); VER=${GITHUB_SHA::7}
-          tar -czf dist/prometheus_${VER}_${OS}_${ARCH}.tar.gz bin/prometheus prometheus.yml
+          # The 'promu' tool puts the binary in .build/linux-amd64/prometheus.
+          # We must use that path here.
+          tar -czf dist/prometheus_${VER}_${OS}_${ARCH}.tar.gz .build/linux-amd64/prometheus prometheus.yml
 
       - name: Upload build/test artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-test-artifacts
           path: |
-            bin/**
+            .build/**
             reports/**
             dist/**
             prometheus.yml
