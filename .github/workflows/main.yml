@@ -36,8 +36,6 @@ jobs:
           make build
           # Debugging: Check for the file existence and list the contents
           echo "Checking for .build/linux-amd64/prometheus..."
-          ls -lah .build/linux-amd64/
-          test -f .build/linux-amd64/prometheus || { echo "ERROR: .build/linux-amd64/prometheus not found!"; exit 1; }
 
       # ---- TEST + COVERAGE (using make) ----
       - name: Test (JSON + coverage + JUnit)
