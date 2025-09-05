@@ -1,7 +1,7 @@
 name: CI (CO2 Task 2)
 on:
   push:
-    branches: [ main, master, edit-style ]
+    branches: [ main ]
   pull_request:
 
 permissions:
