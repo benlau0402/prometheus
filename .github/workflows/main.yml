@@ -32,6 +32,86 @@ jobs:
           go mod download
           CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -buildid=" -o bin/prometheus ./cmd/prometheus
 
+      # ---- NEW: BUILD REPORT (pre-test) ----
+      - name: Generate build report (pre-test)
+        run: |
+          set -e
+          mkdir -p reports
+          COMMIT="${GITHUB_SHA}"
+          REF="${GITHUB_REF}"
+          RUN_ID="${GITHUB_RUN_ID}"
+          DATE_UTC="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          GOVERS="$(go version)"
+          MOD_ROOT="$(go list -m)"
+          # Verify modules and capture output (non-fatal if it prints warnings)
+          MOD_VERIFY="$(go mod verify 2>&1 || true)"
+          # Binary info
+          BIN_PATH="bin/prometheus"
+          if [ ! -f "$BIN_PATH" ]; then
+            echo "ERROR: $BIN_PATH missing. Build step must succeed before report."; exit 1
+          fi
+          BIN_SIZE_BYTES="$(wc -c < "$BIN_PATH" | xargs)"
+          BIN_SHA256="$(sha256sum "$BIN_PATH" | awk '{print $1}')"
+          # Write dependency list
+          go list -m all > reports/dependencies.txt
+
+          # Markdown report
+          {
+            echo "# Build Report"
+            echo ""
+            echo "- **Date (UTC):** $DATE_UTC"
+            echo "- **Commit:** $COMMIT"
+            echo "- **Ref:** $REF"
+            echo "- **Run ID:** $RUN_ID"
+            echo ""
+            echo "## Environment"
+            echo ""
+            echo "\`\`\`"
+            echo "$GOVERS"
+            go env
+            echo "\`\`\`"
+            echo ""
+            echo "## Module"
+            echo ""
+            echo "- Root module: \`$MOD_ROOT\`"
+            echo "- Full dependency list: see \`reports/dependencies.txt\`"
+            echo ""
+            echo "## Build Command"
+            echo ""
+            echo "\`\`\`bash"
+            echo "CGO_ENABLED=0 go build -trimpath -ldflags \"-s -w -buildid=\" -o bin/prometheus ./cmd/prometheus"
+            echo "\`\`\`"
+            echo ""
+            echo "## Module Verification"
+            echo ""
+            echo "\`\`\`"
+            echo "$MOD_VERIFY"
+            echo "\`\`\`"
+            echo ""
+            echo "## Binary"
+            echo ""
+            echo "- Path: \`$BIN_PATH\`"
+            echo "- Size (bytes): \`$BIN_SIZE_BYTES\`"
+            echo "- SHA256: \`$BIN_SHA256\`"
+          } > reports/BUILD_REPORT.md
+
+          # Minimal JSON summary (no jq dependency)
+          cat > reports/build.json <<EOF
+          {
+            "date_utc": "$DATE_UTC",
+            "commit": "$COMMIT",
+            "ref": "$REF",
+            "run_id": "$RUN_ID",
+            "go_version": "$GOVERS",
+            "module_root": "$MOD_ROOT",
+            "binary": {
+              "path": "$BIN_PATH",
+              "size_bytes": $BIN_SIZE_BYTES,
+              "sha256": "$BIN_SHA256"
+            }
+          }
+          EOF
+
       # ---- TEST + COVERAGE ----
       - name: Test (JSON + coverage + JUnit)
         run: |
@@ -63,41 +143,91 @@ jobs:
             prometheus.yml
 
   docker_staging:
-    name: Docker (staging with CI Dockerfile)
+    name: Docker (upstream Dockerfile)
     runs-on: ubuntu-latest
     needs: build_test_package
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: false
 
-      - name: Download build artifacts (binary, reports, package)
-        uses: actions/download-artifact@v4
-        with:
-          name: build-test-artifacts
-          path: .
+    - name: Set up Go (for promu)
+      uses: actions/setup-go@v5
+      with:
+        go-version: "1.22.x"
+        cache: true
 
-      - name: Verify Docker build inputs
-        run: |
-          ls -lah .
-          test -f Dockerfile.ci || (echo "Missing Dockerfile.ci at repo root"; exit 1)
-          test -f bin/prometheus || (echo "Missing bin/prometheus (did build finish?)"; exit 1)
-          test -f prometheus.yml || (echo "Missing prometheus.yml in repo root"; exit 1)
+    - name: Ensure GOPATH/bin on PATH (defensive)
+      run: echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
-      - name: Build image (CI Dockerfile)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.ci
-          push: false
-          tags: local/prometheus:ci
+    - name: Set up Node (for npm_licenses)
+      uses: actions/setup-node@v4
+      with:
+        node-version: "18"
 
-      - name: Save image as artifact (optional evidence)
-        run: docker save local/prometheus:ci -o prometheus_ci_image.tar
+    # Keep linux-amd64 artifacts in Docker context
+    - name: Patch .dockerignore for linux-amd64 artifacts
+      run: |
+        if [ -f .dockerignore ]; then
+          sed -i '/^\.build\/$/d' .dockerignore || true
+          sed -i '/^\.build\/\*$/d' .dockerignore || true
+        fi
+        {
+          echo ".build/*"
+          echo "!.build/linux-amd64/**"
+          echo "/.tarballs/"
+          echo "/data/"
+        } > .dockerignore.tmp
+        (grep -vE '^\.(build|tarballs)/|^/data/|^\s*$' .dockerignore || true) >> .dockerignore.tmp
+        mv .dockerignore.tmp .dockerignore
+        echo "Final .dockerignore:"; cat .dockerignore
 
-      - name: Upload Docker artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-image-tar
-          path: prometheus_ci_image.tar
+    # 1) make promu
+    - name: Install promu & run make promu
+      run: |
+        go install github.com/prometheus/promu@latest
+        promu version || promu help | head -n1
+        make promu
+
+    # 2) promu crossbuild -p linux/amd64
+    - name: Cross build artifacts (linux/amd64)
+      env:
+        GOOS: linux
+        GOARCH: amd64
+      run: |
+        promu version || true
+        promu crossbuild -p linux/amd64
+        ls -lah .build/linux-amd64 || true
+
+    # 3) make npm_licenses
+    - name: Generate npm licenses tarball
+      run: |
+        make npm_licenses
+        test -f npm_licenses.tar.bz2 || (echo "npm_licenses.tar.bz2 missing" && exit 1)
+
+    # Sanity check the inputs the Dockerfile will COPY
+    - name: Sanity check Dockerfile inputs
+      run: |
+        test -f .build/linux-amd64/prometheus || (echo "prometheus binary missing" && exit 1)
+        test -f .build/linux-amd64/promtool   || (echo "promtool binary missing" && exit 1)
+        test -f documentation/examples/prometheus.yml || (echo "example prometheus.yml missing" && exit 1)
+        test -f npm_licenses.tar.bz2 || (echo "npm_licenses.tar.bz2 missing" && exit 1)
+
+    # 4) Build image using the existing Dockerfile
+    - name: Build Docker image (upstream Dockerfile)
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: Dockerfile
+        push: false
+        tags: local/prometheus:amd64
+
+    - name: Save image as artifact
+      run: docker save local/prometheus:amd64 -o prometheus_ci_image.tar
+
+    - name: Upload Docker artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: docker-image-tar
+        path: prometheus_ci_image.tar
