@@ -32,7 +32,7 @@ jobs:
           go mod download
           CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -buildid=" -o bin/prometheus ./cmd/prometheus
 
-      # ---- NEW: BUILD REPORT (pre-test) ----
+      # ---- BUILD REPORT (pre-test) ----
       - name: Generate build report (pre-test)
         run: |
           set -e
@@ -114,8 +114,8 @@ jobs:
           go tool cover -func=reports/coverage.out || true
           go tool cover -html=reports/coverage.out -o reports/coverage.html || true
 
-      # ---- NEW: Convert JUnit XML -> HTML (Option A: junit-viewer) ----
-      - name: Set up Node (for junit-viewer)
+      # ---- Convert JUnit XML -> HTML (xunit-viewer) ----
+      - name: Set up Node (for xunit-viewer)
         uses: actions/setup-node@v4
         with:
           node-version: "18"
@@ -123,10 +123,9 @@ jobs:
       - name: Generate HTML test report
         if: always()
         run: |
-          npm i -g junit-viewer
-          # Don't fail the job if junit.xml is empty/missing
+          npm i -g xunit-viewer || echo "xunit-viewer install warned"
           if [ -s reports/junit.xml ]; then
-            junit-viewer --results=reports/junit.xml --save=reports/test-report.html
+            xunit-viewer -r reports/junit.xml -o reports/test-report.html -t "Go Tests" || true
           else
             echo "No junit.xml found or file is empty; skipping HTML generation."
           fi
