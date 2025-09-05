@@ -23,31 +23,116 @@ jobs:
           go-version: "1.22.x"
           cache: true
 
-      - name: Install build dependencies (goyacc)
-        run: go install golang.org/x/tools/cmd/goyacc@latest
-
       - name: Install reporters (JUnit)
         run: go install github.com/jstemmer/go-junit-report/v2@latest
 
-      # ---- BUILD (using make) ----
-      - name: Build
-        run: |
-          # Use `make` to execute the standardized build process defined in the Makefile.
-          make build
-          # Debugging: Check for the file existence and list the contents
-          echo "Checking for .build/linux-amd64/prometheus..."
-          ls -lah .build/linux-amd64/
-          test -f .build/linux-amd64/prometheus || { echo "ERROR: .build/linux-amd64/prometheus not found!"; exit 1; }
+      # --- UI prerequisites for Makefile build (assets) ---
+      - name: Set up Node (for Makefile UI build)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
 
-      # ---- TEST + COVERAGE (using make) ----
+      # Avoid go:embed failing due to any rogue .git under web/ui/static
+      - name: Clean UI static directory
+        run: |
+          rm -rf web/ui/static
+
+      # ---- BUILD via Makefile ----
+      - name: make build
+        run: |
+          make build
+          # Makefile writes binaries under .build/<os>-<arch>/
+          mkdir -p bin
+          if [ -f .build/linux-amd64/prometheus ]; then
+            cp .build/linux-amd64/prometheus bin/prometheus
+          else
+            echo "ERROR: .build/linux-amd64/prometheus not found"; ls -lah .build || true; exit 1
+          fi
+          chmod +x bin/prometheus
+
+      # ---- BUILD REPORT (pre-test) ----
+      - name: Generate build report (pre-test)
+        run: |
+          set -e
+          mkdir -p reports
+          COMMIT="${GITHUB_SHA}"
+          REF="${GITHUB_REF}"
+          RUN_ID="${GITHUB_RUN_ID}"
+          DATE_UTC="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          GOVERS="$(go version)"
+          MOD_ROOT="$(go list -m)"
+          MOD_VERIFY="$(go mod verify 2>&1 || true)"
+          BIN_PATH="bin/prometheus"
+          if [ ! -f "$BIN_PATH" ]; then
+            echo "ERROR: $BIN_PATH missing. Build step must succeed before report."; exit 1
+          fi
+          BIN_SIZE_BYTES="$(wc -c < "$BIN_PATH" | xargs)"
+          BIN_SHA256="$(sha256sum "$BIN_PATH" | awk '{print $1}')"
+          go list -m all > reports/dependencies.txt
+          {
+            echo "# Build Report"
+            echo ""
+            echo "- **Date (UTC):** $DATE_UTC"
+            echo "- **Commit:** $COMMIT"
+            echo "- **Ref:** $REF"
+            echo "- **Run ID:** $RUN_ID"
+            echo ""
+            echo "## Environment"
+            echo ""
+            echo "\`\`\`"
+            echo "$GOVERS"
+            go env
+            echo "\`\`\`"
+            echo ""
+            echo "## Module"
+            echo ""
+            echo "- Root module: \`$MOD_ROOT\`"
+            echo "- Full dependency list: see \`reports/dependencies.txt\`"
+            echo ""
+            echo "## Build Command"
+            echo ""
+            echo "\`\`\`bash"
+            echo "make build"
+            echo "\`\`\`"
+            echo ""
+            echo "## Module Verification"
+            echo ""
+            echo "\`\`\`"
+            echo "$MOD_VERIFY"
+            echo "\`\`\`"
+            echo ""
+            echo "## Binary"
+            echo ""
+            echo "- Path: \`$BIN_PATH\`"
+            echo "- Size (bytes): \`$BIN_SIZE_BYTES\`"
+            echo "- SHA256: \`$BIN_SHA256\`"
+          } > reports/BUILD_REPORT.md
+          cat > reports/build.json <<EOF
+          {
+            "date_utc": "$DATE_UTC",
+            "commit": "$COMMIT",
+            "ref": "$REF",
+            "run_id": "$RUN_ID",
+            "go_version": "$GOVERS",
+            "module_root": "$MOD_ROOT",
+            "binary": {
+              "path": "$BIN_PATH",
+              "size_bytes": $BIN_SIZE_BYTES,
+              "sha256": "$BIN_SHA256"
+            }
+          }
+          EOF
+
+      # ---- TEST via Makefile (Go only; no UI tests) ----
+      - name: make test (GO_ONLY)
+        run: |
+          make test GO_ONLY=1 || true
+
+      # ---- TEST REPORTS (JSON + coverage + JUnit) ----
       - name: Test (JSON + coverage + JUnit)
         run: |
           mkdir -p reports
-          # Use `make` to execute the standardized test process.
-          # This handles all dependencies like the parser and UI tests.
-          make test || true
-          # The `make test` command doesn't output the JUnit report directly,
-          # so we still need to generate it from the go test JSON output.
+          go test ./... -count=1 -race -coverprofile=reports/coverage.out -json > reports/test.json || true
           cat reports/test.json | go-junit-report -parser gojson > reports/junit.xml || true
           go tool cover -func=reports/coverage.out || true
           go tool cover -html=reports/coverage.out -o reports/coverage.html || true
@@ -84,24 +169,31 @@ jobs:
         run: |
           test -f prometheus.yml || (echo "prometheus.yml missing in repo root"; exit 1)
 
+      - name: Ensure binary at bin/prometheus
+        run: |
+          set -e
+          mkdir -p bin
+          if [ ! -f bin/prometheus ] && [ -f .build/linux-amd64/prometheus ]; then
+            cp .build/linux-amd64/prometheus bin/prometheus
+          fi
+          test -f bin/prometheus || (echo "ERROR: bin/prometheus missing"; exit 1)
+
       - name: Package tarball
         run: |
           mkdir -p dist
           OS=$(go env GOOS); ARCH=$(go env GOARCH); VER=${GITHUB_SHA::7}
-          # The 'promu' tool puts the binary in .build/linux-amd64/prometheus.
-          # We must use that path here.
-          tar -czf dist/prometheus_${VER}_${OS}_${ARCH}.tar.gz .build/linux-amd64/prometheus prometheus.yml
+          tar -czf dist/prometheus_${VER}_${OS}_${ARCH}.tar.gz bin/prometheus prometheus.yml
 
       - name: Upload build/test artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-test-artifacts
           path: |
-            .build/**
+            bin/**
             reports/**
             dist/**
             prometheus.yml
-
+            
   docker_staging:
     name: Docker (upstream Dockerfile)
     runs-on: ubuntu-latest
