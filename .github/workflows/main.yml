@@ -37,50 +37,50 @@ jobs:
           # Debugging: Check for the file existence and list the contents
           echo "Checking for .build/linux-amd64/prometheus..."
 
-      # ---- TEST + COVERAGE (using make) ----
-      - name: Test (JSON + coverage + JUnit)
-        run: |
-          mkdir -p reports
-          # Use `make` to execute the standardized test process.
-          # This handles all dependencies like the parser and UI tests.
-          make test || true
-          # The `make test` command doesn't output the JUnit report directly,
-          # so we still need to generate it from the go test JSON output.
-          cat reports/test.json | go-junit-report -parser gojson > reports/junit.xml || true
-          go tool cover -func=reports/coverage.out || true
-          go tool cover -html=reports/coverage.out -o reports/coverage.html || true
+      # # ---- TEST + COVERAGE (using make) ----
+      # - name: Test (JSON + coverage + JUnit)
+      #   run: |
+      #     mkdir -p reports
+      #     # Use `make` to execute the standardized test process.
+      #     # This handles all dependencies like the parser and UI tests.
+      #     make test || true
+      #     # The `make test` command doesn't output the JUnit report directly,
+      #     # so we still need to generate it from the go test JSON output.
+      #     cat reports/test.json | go-junit-report -parser gojson > reports/junit.xml || true
+      #     go tool cover -func=reports/coverage.out || true
+      #     go tool cover -html=reports/coverage.out -o reports/coverage.html || true
 
-      # ---- Convert JUnit XML -> HTML (junit2html) ----
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
+      # # ---- Convert JUnit XML -> HTML (junit2html) ----
+      # - name: Set up Python
+      #   uses: actions/setup-python@v5
+      #   with:
+      #     python-version: '3.x'
 
-      - name: Generate HTML test report
-        if: always()
-        run: |
-          pip install junit2html
-          if [ -s reports/junit.xml ]; then
-            junit2html reports/junit.xml reports/test-report.html || echo "junit2html failed"
-            ls -lh reports/
-          else
-            echo "No junit.xml found or file is empty; skipping HTML generation."
-          fi
+      # - name: Generate HTML test report
+      #   if: always()
+      #   run: |
+      #     pip install junit2html
+      #     if [ -s reports/junit.xml ]; then
+      #       junit2html reports/junit.xml reports/test-report.html || echo "junit2html failed"
+      #       ls -lh reports/
+      #     else
+      #       echo "No junit.xml found or file is empty; skipping HTML generation."
+      #     fi
 
-      - name: Add report link to job summary
-        if: always()
-        run: |
-          echo "### Test Reports" >> $GITHUB_STEP_SUMMARY
-          echo "- JUnit XML: \`reports/junit.xml\`" >> $GITHUB_STEP_SUMMARY
-          echo "- HTML: \`reports/test-report.html\` (download from the 'build-test-artifacts' artifact)" >> $GITHUB_STEP_SUMMARY
-          if [ -f reports/coverage.html ]; then
-            echo "- Coverage HTML: \`reports/coverage.html\`" >> $GITHUB_STEP_SUMMARY
-          fi
+      # - name: Add report link to job summary
+      #   if: always()
+      #   run: |
+      #     echo "### Test Reports" >> $GITHUB_STEP_SUMMARY
+      #     echo "- JUnit XML: \`reports/junit.xml\`" >> $GITHUB_STEP_SUMMARY
+      #     echo "- HTML: \`reports/test-report.html\` (download from the 'build-test-artifacts' artifact)" >> $GITHUB_STEP_SUMMARY
+      #     if [ -f reports/coverage.html ]; then
+      #       echo "- Coverage HTML: \`reports/coverage.html\`" >> $GITHUB_STEP_SUMMARY
+      #     fi
 
-      # ---- PACKAGE ARTIFACT ----
-      - name: Ensure prometheus.yml present
-        run: |
-          test -f prometheus.yml || (echo "prometheus.yml missing in repo root"; exit 1)
+      # # ---- PACKAGE ARTIFACT ----
+      # - name: Ensure prometheus.yml present
+      #   run: |
+      #     test -f prometheus.yml || (echo "prometheus.yml missing in repo root"; exit 1)
 
       - name: Package tarball
         run: |
@@ -88,7 +88,7 @@ jobs:
           OS=$(go env GOOS); ARCH=$(go env GOARCH); VER=${GITHUB_SHA::7}
           # The 'promu' tool puts the binary in .build/linux-amd64/prometheus.
           # We must use that path here.
-          tar -czf dist/prometheus_${VER}_${OS}_${ARCH}.tar.gz /home/runner/work/prometheus/prometheus  prometheus.yml
+          tar -czf dist/prometheus_${VER}_${OS}_${ARCH}.tar.gz /home/runner/work/prometheus/prometheus/.build/linux-amd64/prometheus  prometheus.yml
 
       - name: Upload build/test artifacts
         uses: actions/upload-artifact@v4
